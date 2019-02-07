@@ -32,9 +32,10 @@
 -type expected_code() :: 200..600.
 -type expected_codes() :: [expected_code()].
 -type expected_headers() :: [{kz_term:text(), kz_term:text()}].
--type expectations() :: #{'response_codes' => expected_codes()
-                         ,'response_headers' => expected_headers()
-                         }.
+-type expectation() :: #{'response_codes' => expected_codes()
+                        ,'response_headers' => expected_headers()
+                        }.
+-type expectations() :: [expectation()].
 
 -type response() :: binary() |
                     kz_http:ret() |
@@ -166,12 +167,14 @@ default_request_headers(RequestId) ->
      | default_request_headers()
     ].
 
--spec make_request(expectations() | expected_code() | expected_codes(), fun_2(), string(), kz_term:proplist()) ->
+-spec make_request(expectations() | expectation() | expected_code() | expected_codes(), fun_2(), string(), kz_term:proplist()) ->
                           response().
 make_request(Code, HTTP, URL, RequestHeaders) when is_integer(Code) ->
     make_request(#{'response_codes' => [Code]}, HTTP, URL, RequestHeaders);
 make_request([Code|_]=Codes, HTTP, URL, RequestHeaders) when is_integer(Code) ->
     make_request(#{'response_codes' => Codes}, HTTP, URL, RequestHeaders);
+make_request(#{}=Expectation, HTTP, URL, RequestHeaders) ->
+    make_request([Expectation], HTTP, URL, RequestHeaders);
 make_request(Expectations, HTTP, URL, RequestHeaders) ->
     lager:info("~p(~p, ~p)", [HTTP, URL, RequestHeaders]),
 
@@ -183,6 +186,8 @@ make_request(Code, HTTP, URL, RequestHeaders, RequestBody) when is_integer(Code)
     make_request(#{'response_codes' => [Code]}, HTTP, URL, RequestHeaders, RequestBody);
 make_request([Code|_]=Codes, HTTP, URL, RequestHeaders, RequestBody) when is_integer(Code) ->
     make_request(#{'response_codes' => Codes}, HTTP, URL, RequestHeaders, RequestBody);
+make_request(#{}=Expectation, HTTP, URL, RequestHeaders, RequestBody) ->
+    make_request([Expectation], HTTP, URL, RequestHeaders, RequestBody);
 make_request(Expectations, HTTP, URL, RequestHeaders, RequestBody) ->
     lager:info("~p: ~s", [HTTP, URL]),
     lager:debug("headers: ~p", [RequestHeaders]),
@@ -200,11 +205,12 @@ create_envelope(Data, Envelope) ->
     kz_json:set_value(<<"data">>, Data, Envelope).
 
 -spec handle_response(expectations(), kz_http:ret()) -> response().
-handle_response(Expectations, {'ok', ActualCode, RespHeaders, RespBody}) ->
+handle_response([#{}|_]=Expectations, {'ok', ActualCode, RespHeaders, RespBody}) ->
     case expectations_met(Expectations, ActualCode, RespHeaders) of
         'true' -> RespBody;
         'false' ->
-            lager:info("resp headers: ~p", [RespHeaders]),
+            lager:info("expectations not met: ~p", [Expectations]),
+            lager:debug("~p: ~p", [ActualCode, RespHeaders]),
             {'error', RespBody}
     end;
 handle_response(_Expectations, {'error','socket_closed_remotely'}=E) ->
@@ -214,19 +220,19 @@ handle_response(_ExpectedCode, {'error', _}=E) ->
     lager:error("broken req: ~p", [E]),
     E.
 
+-spec expectations_met(expectations(), expected_code(), expected_headers()) -> boolean().
 expectations_met(Expectations, RespCode, RespHeaders) ->
-    response_code_matches(Expectations, RespCode)
-        andalso response_headers_match(Expectations, RespHeaders).
+    lists:any(fun(E) -> expectation_met(E, RespCode, RespHeaders) end
+             ,Expectations
+             ).
+
+-spec expectation_met(expectation(), expected_code(), expected_headers()) -> boolean().
+expectation_met(Expectation, RespCode, RespHeaders) ->
+    response_code_matches(Expectation, RespCode)
+        andalso response_headers_match(Expectation, RespHeaders).
 
 response_code_matches(#{'response_codes' := ResponseCodes}, ResponseCode) ->
-    case lists:member(ResponseCode, ResponseCodes) of
-        'true' -> 'true';
-        'false' ->
-            lager:error("failed expectation: code ~w but expected ~w"
-                       ,[ResponseCode, ResponseCodes]
-                       ),
-            'false'
-    end;
+    lists:member(ResponseCode, ResponseCodes);
 response_code_matches(_Expectations, _Code) -> 'true'.
 
 response_headers_match(#{'response_headers' := ExpectedHeaders}, RespHeaders) ->
@@ -236,18 +242,7 @@ response_headers_match(#{'response_headers' := ExpectedHeaders}, RespHeaders) ->
 response_headers_match(_Expectations, _RespHeaders) -> 'true'.
 
 response_header_matches({ExpectedHeader, ExpectedValue}, RespHeaders) ->
-    Value = kz_term:to_list(ExpectedValue),
-    case kz_http_util:get_resp_header(kz_term:to_list(ExpectedHeader), RespHeaders) of
-        Value -> 'true';
-        'undefined' ->
-            lager:error("failed expectation: header '~s' missing from response", [ExpectedHeader]),
-            'false';
-        _ActualValue ->
-            lager:error("failed expectation: header '~s' is not ~p but ~p"
-                       ,[ExpectedHeader, ExpectedValue, _ActualValue]
-                       ),
-            'false'
-    end.
+    kz_term:to_list(ExpectedValue) =:= kz_http_util:get_resp_header(kz_term:to_list(ExpectedHeader), RespHeaders).
 
 -spec start_trace() -> {'ok', kz_data_tracing:trace_ref()}.
 start_trace() ->
